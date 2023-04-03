@@ -69,12 +69,21 @@ class SettingsViewController: UIViewController {
             self?.present(alert, animated: true)
         }
         cellModels.append(style)
-        let liveHack = CellModel(title: "直播播放黑屏修复", desp: Settings.livePlayerHack ? "开" : "关") {
-            [weak self] in
-            Settings.livePlayerHack.toggle()
-            self?.setupData()
+
+        let relatedVideoLoadMode = CellModel(title: "视频详情相关推荐加载模式", desp: Settings.showRelatedVideoInCurrentVC ? "页面刷新" : "新页面中打开") { [weak self] in
+            let alert = UIAlertController(title: "视频详情相关推荐加载模式", message: "", preferredStyle: .actionSheet)
+            alert.addAction(UIAlertAction(title: "页面刷新", style: .default) { _ in
+                Settings.showRelatedVideoInCurrentVC = true
+                self?.setupData()
+            })
+            alert.addAction(UIAlertAction(title: "新页面中打开", style: .default) { _ in
+                Settings.showRelatedVideoInCurrentVC = false
+                self?.setupData()
+            })
+            alert.addAction(cancelAction)
+            self?.present(alert, animated: true)
         }
-        cellModels.append(liveHack)
+        cellModels.append(relatedVideoLoadMode)
 
         let continuePlay = CellModel(title: "继续播放", desp: Settings.continuePlay ? "开" : "关") {
             [weak self] in
@@ -82,6 +91,13 @@ class SettingsViewController: UIViewController {
             self?.setupData()
         }
         cellModels.append(continuePlay)
+
+        let autoSkip = CellModel(title: "自动跳过片头片尾", desp: Settings.autoSkip ? "开" : "关") {
+            [weak self] in
+            Settings.autoSkip.toggle()
+            self?.setupData()
+        }
+        cellModels.append(autoSkip)
 
         let quality = CellModel(title: "最高画质", desp: Settings.mediaQuality.desp) { [weak self] in
             let alert = UIAlertController(title: "最高画质", message: "4k以上需要大会员", preferredStyle: .actionSheet)
@@ -110,12 +126,17 @@ class SettingsViewController: UIViewController {
         }
         cellModels.append(hevc)
 
-        let danmu = CellModel(title: "默认弹幕开关", desp: Settings.defaultDanmuStatus ? "开" : "关") {
+        let continouslyPlay = CellModel(title: "连续播放", desp: Settings.continouslyPlay ? "开" : "关") {
             [weak self] in
-            Settings.defaultDanmuStatus.toggle()
+            Settings.continouslyPlay.toggle()
             self?.setupData()
         }
-        cellModels.append(danmu)
+        cellModels.append(continouslyPlay)
+
+        let fontSize = cellModelWithActions(title: "弹幕大小", message: "默认为36", current: Settings.danmuSize.title, options: DanmuSize.allCases, optionString: DanmuSize.allCases.map({ $0.title })) {
+            Settings.danmuSize = $0
+        }
+        cellModels.append(fontSize)
 
         let mask = CellModel(title: "智能防档弹幕", desp: Settings.danmuMask ? "开" : "关") {
             [weak self] in
@@ -139,6 +160,29 @@ class SettingsViewController: UIViewController {
         cellModels.append(match)
 
         collectionView.reloadData()
+    }
+
+    func cellModelWithActions<T>(title: String,
+                                 message: String?,
+                                 current: String,
+                                 options: [T],
+                                 optionString: [String],
+                                 onSelect: ((T) -> Void)? = nil) -> CellModel
+    {
+        return CellModel(title: title, desp: current) { [weak self] in
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .actionSheet)
+
+            for (idx, string) in optionString.enumerated() {
+                let action = UIAlertAction(title: string, style: .default) { _ in
+                    onSelect?(options[idx])
+                    self?.setupData()
+                }
+                alert.addAction(action)
+            }
+            let cancelAction = UIAlertAction(title: nil, style: .cancel)
+            alert.addAction(cancelAction)
+            self?.present(alert, animated: true)
+        }
     }
 }
 

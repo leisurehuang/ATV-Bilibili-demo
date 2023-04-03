@@ -44,6 +44,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
     private var hasPreferSubtitleAdded = false
     private var httpServer = HttpServer()
     private var aid = 0
+    private(set) var httpPort = 0
 
     deinit {
         httpServer.stop()
@@ -87,12 +88,14 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
                 framerate = "30"
             }
         }
-        if codecs == "dvh1.08.07" {
+        if codecs == "dvh1.08.07" || codecs == "dvh1.08.03" {
             supplementCodesc = codecs
+            videoRange = "HLG"
             codecs = "hvc1.2.4.L153.b0"
         } else if codecs == "dvh1.08.06" {
             supplementCodesc = codecs
             codecs = "hvc1.2.4.L150"
+            videoRange = "PQ"
         }
 
         if let value = Double(framerate), value >= 60 {
@@ -123,7 +126,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
                 segment = SidxParseUtil.processIndexData(data: res)
             }
         } else {
-            print("cache hit")
+            Logger.debug("cache hit")
         }
         let inits = info.info.segment_base.initialization.components(separatedBy: "-")
         guard let moovIdxStr = inits.last,
@@ -282,12 +285,15 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         if hasSubtitle {
             try? httpServer.start(0)
             bindHttpServer()
+            httpPort = (try? httpServer.port()) ?? 0
         }
         for subtitle in subtitles {
             addSubtitleData(lang: subtitle.lan, name: subtitle.lan_doc, duration: info.dash.duration, url: subtitle.url.absoluteString)
         }
 
         masterPlaylist.append("\n#EXT-X-ENDLIST\n")
+
+        Logger.debug("masterPlaylist:", masterPlaylist)
     }
 
     private func reportError(_ loadingRequest: AVAssetResourceLoadingRequest, withErrorCode error: Int) {
@@ -324,7 +330,7 @@ private extension BilibiliVideoResourceLoaderDelegate {
             return
         }
         let urlStr = customUrl.absoluteString
-        print("handleCustomPlaylistRequest: \(urlStr)")
+        Logger.debug("handleCustomPlaylistRequest: \(urlStr)")
         if urlStr == URLs.play {
             report(loadingRequest, content: masterPlaylist)
             return
@@ -366,7 +372,7 @@ private extension BilibiliVideoResourceLoaderDelegate {
             }
             return
         }
-        print("handle loading", customUrl)
+        Logger.debug("handle loading", customUrl)
     }
 
     func bindHttpServer() {

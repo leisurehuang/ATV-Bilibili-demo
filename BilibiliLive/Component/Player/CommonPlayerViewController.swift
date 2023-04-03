@@ -93,7 +93,7 @@ class CommonPlayerViewController: AVPlayerViewController {
     }
 
     func playerStatusDidChange() {
-        print("player status: \(player?.currentItem?.status.rawValue ?? -1)")
+        Logger.debug("player status: \(player?.currentItem?.status.rawValue ?? -1)")
         switch player?.currentItem?.status {
         case .readyToPlay:
             if maskProvider?.needVideoOutput() == true {
@@ -102,8 +102,8 @@ class CommonPlayerViewController: AVPlayerViewController {
             startPlay()
         case .failed:
             removeObservarPlayerItem()
-            print(player?.currentItem?.error ?? "no error")
-            print(player?.currentItem?.errorLog() ?? "no error log")
+            Logger.debug(player?.currentItem?.error ?? "no error")
+            Logger.debug(player?.currentItem?.errorLog() ?? "no error log")
             if retryCount < maxRetryCount, !retryPlay() {
                 let log = playerItem?.errorLog()
                 let errorLogData = log?.extendedLogData() ?? Data()
@@ -163,33 +163,11 @@ class CommonPlayerViewController: AVPlayerViewController {
         let danmuAction = UIAction(title: "Show Danmu", image: danMuView.isHidden ? danmuImageDisable : danmuImage) {
             [weak self] action in
             guard let self = self else { return }
+            Settings.defaultDanmuStatus.toggle()
             self.danMuView.isHidden.toggle()
             action.image = self.danMuView.isHidden ? danmuImageDisable : danmuImage
         }
         menus.append(danmuAction)
-
-        if allowChangeSpeed {
-            let playSpeedArray = [PlaySpeed(name: "0.5X", value: 0.5),
-                                  PlaySpeed(name: "0.75X", value: 0.75),
-                                  PlaySpeed(name: "1X", value: 1),
-                                  PlaySpeed(name: "1.25X", value: 1.25),
-                                  PlaySpeed(name: "1.5X", value: 1.5),
-                                  PlaySpeed(name: "2X", value: 2)]
-
-            if #available(tvOS 16.0, *) {
-                speeds = playSpeedArray.map { AVPlaybackSpeed(rate: $0.value, localizedName: $0.name) }
-            } else {
-                let speedActions = playSpeedArray.map { playSpeed in
-                    UIAction(title: playSpeed.name, state: player?.rate ?? 1 == playSpeed.value ? .on : .off) { [weak self] action in
-                        self?.player?.currentItem?.audioTimePitchAlgorithm = .timeDomain
-                        self?.player?.rate = playSpeed.value
-                        self?.danMuView.playingSpeed = playSpeed.value
-                    }
-                }
-                let playSpeedMenu = UIMenu(title: "播放速度", image: UIImage(systemName: "speedometer"), options: [.singleSelection], children: speedActions)
-                menus.append(playSpeedMenu)
-            }
-        }
 
         let debugEnableImage = UIImage(systemName: "terminal.fill")
         let debugDisableImage = UIImage(systemName: "terminal")
@@ -204,7 +182,40 @@ class CommonPlayerViewController: AVPlayerViewController {
                 self.startDebug()
             }
         }
-        menus.append(debugAction)
+
+        if allowChangeSpeed {
+            // Create ∞ and ⚙ images.
+            let loopImage = UIImage(systemName: "infinity")
+            let gearImage = UIImage(systemName: "gearshape")
+
+            // Create an action to enable looping playback.
+            let loopAction = UIAction(title: "循环播放", image: loopImage, state: Settings.loopPlay ? .on : .off) {
+                action in
+                action.state = (action.state == .off) ? .on : .off
+                Settings.loopPlay = action.state == .on
+            }
+
+            let playSpeedArray = [PlaySpeed(name: "0.5X", value: 0.5),
+                                  PlaySpeed(name: "0.75X", value: 0.75),
+                                  PlaySpeed(name: "1X", value: 1),
+                                  PlaySpeed(name: "1.25X", value: 1.25),
+                                  PlaySpeed(name: "1.5X", value: 1.5),
+                                  PlaySpeed(name: "2X", value: 2)]
+
+            let speedActions = playSpeedArray.map { playSpeed in
+                UIAction(title: playSpeed.name, state: player?.rate ?? 1 == playSpeed.value ? .on : .off) { [weak self] action in
+                    self?.player?.currentItem?.audioTimePitchAlgorithm = .timeDomain
+                    self?.player?.rate = playSpeed.value
+                    self?.danMuView.playingSpeed = playSpeed.value
+                }
+            }
+            let playSpeedMenu = UIMenu(title: "播放速度", options: [.displayInline, .singleSelection], children: speedActions)
+            let menu = UIMenu(title: "播放设置", image: gearImage, children: [playSpeedMenu, loopAction, debugAction])
+            menus.append(menu)
+        } else {
+            menus.append(debugAction)
+        }
+
         transportBarCustomMenuItems = menus
     }
 
@@ -226,7 +237,7 @@ class CommonPlayerViewController: AVPlayerViewController {
     func setupMask() {
         guard let maskProvider else { return }
 //        danMuView.backgroundColor = UIColor.red.withAlphaComponent(0.5)
-        print("mask provider is \(maskProvider)")
+        Logger.info("mask provider is \(maskProvider)")
         let interval = CMTime(seconds: 1.0 / CGFloat(maskProvider.preferFPS()),
                               preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         player?.addPeriodicTimeObserver(forInterval: interval, queue: .main, using: {
@@ -244,9 +255,11 @@ class CommonPlayerViewController: AVPlayerViewController {
         return false
     }
 
-    @objc func playerDidFinishPlaying() {
-        // need override
+    @objc private func playerDidFinishPlaying() {
+        playDidEnd()
     }
+
+    func playDidEnd() {}
 
     func showErrorAlertAndExit(title: String = "播放失败", message: String = "未知错误") {
         let alertController = UIAlertController(title: title, message: message, preferredStyle: .alert)
@@ -289,9 +302,11 @@ class CommonPlayerViewController: AVPlayerViewController {
         bitrate audio:\(bitrateStr(averageAudioBitrate)), video: \(bitrateStr(averageVideoBitrate))
         observedBitrate:\(bitrateStr(observedBitrate))
         indicatedAverageBitrate:\(bitrateStr(indicatedBitrate))
-        maskProvider: \(String(describing: maskProvider))
+        maskProvider: \(String(describing: maskProvider))  \(additionDebugInfo())
         """
     }
+
+    func additionDebugInfo() -> String { return "" }
 
     var debugTimer: Timer?
     var debugEnable: Bool { debugTimer?.isValid ?? false }
@@ -324,6 +339,7 @@ class CommonPlayerViewController: AVPlayerViewController {
 
     private func initDanmuView() {
         view.addSubview(danMuView)
+        danMuView.accessibilityLabel = "danmuView"
         danMuView.makeConstraintsToBindToSuperview()
         danMuView.isHidden = !Settings.defaultDanmuStatus
     }
@@ -337,6 +353,11 @@ class CommonPlayerViewController: AVPlayerViewController {
         videoItem.add(videoOutput)
         self.videoOutput = videoOutput
         maskProvider?.setVideoOutout(ouput: videoOutput)
+    }
+
+    func ensureDanmuViewFront() {
+        view.bringSubviewToFront(danMuView)
+        danMuView.play()
     }
 }
 
@@ -363,10 +384,12 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
             presentedViewController.dismiss(animated: false) {
                 parent?.present(playerViewController, animated: false)
                 completionHandler(true)
+                (playerViewController as? CommonPlayerViewController)?.ensureDanmuViewFront()
             }
         } else {
             presentedViewController.present(playerViewController, animated: false) {
                 completionHandler(true)
+                (playerViewController as? CommonPlayerViewController)?.ensureDanmuViewFront()
             }
         }
     }

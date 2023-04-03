@@ -1,5 +1,6 @@
 name: Build workflow
 on:
+  pull_request:
   push:
     branches: [ "main" ]
 
@@ -23,6 +24,7 @@ jobs:
           bundle exec fastlane build_unsign_ipa
 
       - name: List, filter and delete artifacts
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/github-script@v6
         id: artifact
         with:
@@ -38,7 +40,8 @@ jobs:
               .forEach(({ id }) => { github.rest.actions.deleteArtifact({ owner, repo, artifact_id: id, }) })
 
       - name: Upload latest artifact
-        uses: actions/upload-artifact@v2
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v3
         with:
           name: main-unsigned.ipa
           path: BilbiliAtvDemo.ipa

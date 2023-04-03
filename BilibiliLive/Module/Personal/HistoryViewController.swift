@@ -19,12 +19,16 @@ class HistoryViewController: UIViewController {
             [weak self] in
             self?.goDetail(with: $0 as! HistoryData)
         }
-        reloadData()
     }
 
     func goDetail(with history: HistoryData) {
         let detailVC = VideoDetailViewController.create(aid: history.aid, cid: history.cid ?? 0)
         detailVC.present(from: self)
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        reloadData()
     }
 }
 

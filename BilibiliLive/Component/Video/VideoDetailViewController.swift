@@ -54,6 +54,7 @@ class VideoDetailViewController: UIViewController {
     private var aid = 0
     private var cid = 0
     private var data: VideoDetail?
+    @IBOutlet var scrollView: UIScrollView!
     private var didSentCoins = 0 {
         didSet {
             if didSentCoins > 0 {
@@ -67,6 +68,8 @@ class VideoDetailViewController: UIViewController {
     private var pages = [VideoPage]()
     private var replys: Replys?
     private var subTitles: [SubtitleData]?
+
+    private var allUgcEpisodes = [VideoDetail.Info.UgcSeason.UgcVideoInfo]()
 
     static func create(aid: Int, cid: Int?) -> VideoDetailViewController {
         let vc = UIStoryboard(name: "Main", bundle: .main).instantiateViewController(identifier: String(describing: self)) as! VideoDetailViewController
@@ -89,9 +92,6 @@ class VideoDetailViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        setupLoading()
-        pageView.isHidden = true
-        ugcView.isHidden = true
         Task { await fetchData() }
 
         pageCollectionView.register(BLTextOnlyCollectionViewCell.self, forCellWithReuseIdentifier: String(describing: BLTextOnlyCollectionViewCell.self))
@@ -144,18 +144,17 @@ class VideoDetailViewController: UIViewController {
         if !direatlyEnterVideo {
             vc.present(self, animated: true)
         } else {
-            vc.present(self, animated: false) { [self] in
-                let player = VideoPlayerViewController()
-                player.aid = aid
-                player.cid = cid
-                present(player, animated: true)
+            vc.present(self, animated: false) { [weak self] in
+                guard let self else { return }
+                let player = VideoPlayerViewController(playInfo: PlayInfo(aid: self.aid, cid: self.cid))
+                self.present(player, animated: true)
             }
         }
     }
 
     private func exit(with error: Error) {
-        print(error)
-        let alertVC = UIAlertController(title: "获取失败", message: nil, preferredStyle: .alert)
+        Logger.warn(error)
+        let alertVC = UIAlertController(title: "获取失败", message: error.localizedDescription, preferredStyle: .alert)
         alertVC.addAction(UIAlertAction(title: "Ok", style: .cancel, handler: { [weak self] action in
             self?.dismiss(animated: true)
         }))
@@ -163,6 +162,13 @@ class VideoDetailViewController: UIViewController {
     }
 
     private func fetchData() async {
+        scrollView.setContentOffset(.zero, animated: false)
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+        backgroundImageView.alpha = 0
+        setupLoading()
+        pageView.isHidden = true
+        ugcView.isHidden = true
         do {
             if seasonId > 0 {
                 isBangumi = true
@@ -264,14 +270,19 @@ class VideoDetailViewController: UIViewController {
         loadingView.stopAnimating()
         loadingView.removeFromSuperview()
         effectContainerView.isHidden = false
-        backgroundImageView.alpha = 0
         UIView.animate(withDuration: 0.25) {
             self.backgroundImageView.alpha = 1
         }
 
+        if let season = data.View.ugc_season {
+            allUgcEpisodes = Array((season.sections.map { $0.episodes }.joined()))
+        }
         ugcCollectionView.reloadData()
         ugcLabel.text = "合集 \(data.View.ugc_season?.title ?? "")  \(data.View.ugc_season?.sections.first?.title ?? "")"
-        ugcView.isHidden = data.View.ugc_season?.sections.count ?? 0 == 0
+        ugcView.isHidden = allUgcEpisodes.count == 0
+        if allUgcEpisodes.count > 0 {
+            ugcCollectionView.scrollToItem(at: IndexPath(item: allUgcEpisodes.map { $0.aid }.firstIndex(of: aid) ?? 0, section: 0), at: .left, animated: false)
+        }
 
         recommandCollectionView.reloadData()
     }
@@ -290,10 +301,15 @@ class VideoDetailViewController: UIViewController {
     }
 
     @IBAction func actionPlay(_ sender: Any) {
-        let player = VideoPlayerViewController()
-        player.aid = aid
-        player.cid = cid
+        let player = VideoPlayerViewController(playInfo: PlayInfo(aid: aid, cid: cid, isBangumi: isBangumi))
         player.data = data
+        if pages.count > 0, let index = pages.firstIndex(where: { $0.cid == cid }) {
+            let seq = pages.dropFirst(index).map({ PlayInfo(aid: aid, cid: $0.cid, isBangumi: isBangumi) })
+            if seq.count > 0 {
+                let nextProvider = VideoNextProvider(seq: seq)
+                player.nextProvider = nextProvider
+            }
+        }
         present(player, animated: true, completion: nil)
     }
 
@@ -357,7 +373,7 @@ class VideoDetailViewController: UIViewController {
                 alert.addAction(UIAlertAction(title: fav.title, style: .default) { [weak self] _ in
                     self?.favButton.title? += 1
                     self?.favButton.isOn = true
-                    WebRequest.requestFavorite(aid: aid, mlid: fav.id)
+                    WebRequest.requestFavorite(aid: aid, mid: fav.id)
                 })
             }
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
@@ -376,23 +392,39 @@ extension VideoDetailViewController: UICollectionViewDelegate {
         switch collectionView {
         case pageCollectionView:
             let page = pages[indexPath.item]
-            let player = VideoPlayerViewController()
-            player.aid = isBangumi ? page.page : aid
-            player.cid = page.cid
+            let player = VideoPlayerViewController(playInfo: PlayInfo(aid: isBangumi ? page.page : aid, cid: page.cid, isBangumi: isBangumi))
             player.data = isBangumi ? nil : data
+
+            let seq = pages.dropFirst(indexPath.item).map({ PlayInfo(aid: aid, cid: $0.cid, isBangumi: isBangumi) })
+            if seq.count > 0 {
+                let nextProvider = VideoNextProvider(seq: seq)
+                player.nextProvider = nextProvider
+            }
             present(player, animated: true, completion: nil)
         case replysCollectionView:
-            guard let reply = replys?.replies[indexPath.item] else { return }
+            guard let reply = replys?.replies?[indexPath.item] else { return }
             let detail = ContentDetailViewController.createReply(content: reply.content.message)
             present(detail, animated: true)
         case ugcCollectionView:
-            guard let video = data?.View.ugc_season?.sections.first?.episodes[indexPath.item] else { return }
-            let detailVC = VideoDetailViewController.create(aid: video.aid, cid: video.cid)
-            detailVC.present(from: self)
-        case recommandCollectionView:
-            if let video = data?.Related[indexPath.item] {
+            let video = allUgcEpisodes[indexPath.item]
+            if Settings.showRelatedVideoInCurrentVC {
+                aid = video.aid
+                cid = video.cid
+                Task { await fetchData() }
+            } else {
                 let detailVC = VideoDetailViewController.create(aid: video.aid, cid: video.cid)
                 detailVC.present(from: self)
+            }
+        case recommandCollectionView:
+            if let video = data?.Related[indexPath.item] {
+                if Settings.showRelatedVideoInCurrentVC {
+                    aid = video.aid
+                    cid = video.cid
+                    Task { await fetchData() }
+                } else {
+                    let detailVC = VideoDetailViewController.create(aid: video.aid, cid: video.cid)
+                    detailVC.present(from: self)
+                }
             }
         default:
             break
@@ -406,9 +438,9 @@ extension VideoDetailViewController: UICollectionViewDataSource {
         case pageCollectionView:
             return pages.count
         case replysCollectionView:
-            return replys?.replies.count ?? 0
+            return replys?.replies?.count ?? 0
         case ugcCollectionView:
-            return data?.View.ugc_season?.sections.first?.episodes.count ?? 0
+            return allUgcEpisodes.count
         case recommandCollectionView:
             return data?.Related.count ?? 0
         default:
@@ -425,15 +457,14 @@ extension VideoDetailViewController: UICollectionViewDataSource {
             return cell
         case replysCollectionView:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: String(describing: ReplyCell.self), for: indexPath) as! ReplyCell
-            if let reply = replys?.replies[indexPath.item] {
+            if let reply = replys?.replies?[indexPath.item] {
                 cell.config(replay: reply)
             }
             return cell
         case ugcCollectionView:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: String(describing: RelatedVideoCell.self), for: indexPath) as! RelatedVideoCell
-            if let record = data?.View.ugc_season?.sections.first?.episodes[indexPath.row] {
-                cell.update(data: record)
-            }
+            let record = allUgcEpisodes[indexPath.row]
+            cell.update(data: record)
             return cell
         case recommandCollectionView:
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: String(describing: RelatedVideoCell.self), for: indexPath) as! RelatedVideoCell
@@ -455,6 +486,7 @@ class BLCardView: TVCardView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        cardBackgroundColor = UIColor(named: "bgColor")
     }
 }
 
@@ -528,7 +560,7 @@ class RelatedVideoCell: BLMotionCollectionViewCell {
 
     func update(data: any DisplayData) {
         titleLabel.text = data.title
-        imageView.kf.setImage(with: data.pic, options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 360, height: 202)))])
+        imageView.kf.setImage(with: data.pic, options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 360, height: 202))), .cacheOriginalImage])
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
@@ -599,7 +631,7 @@ class NoteDetailView: UIControl {
 
     func setup() {
         addSubview(backgroundView)
-        backgroundView.backgroundColor = UIColor.white
+        backgroundView.backgroundColor = UIColor(named: "bgColor")
         backgroundView.layer.shadowOffset = CGSizeMake(0, 10)
         backgroundView.layer.shadowOpacity = 0.15
         backgroundView.layer.shadowRadius = 16.0
@@ -615,7 +647,7 @@ class NoteDetailView: UIControl {
         addSubview(label)
         label.numberOfLines = 0
         label.font = UIFont.systemFont(ofSize: 29)
-        label.textColor = UIColor.black.withAlphaComponent(0.9)
+        label.textColor = UIColor(named: "titleColor")
         label.snp.makeConstraints { make in
             make.leading.trailing.equalToSuperview()
             make.top.equalToSuperview().offset(14)

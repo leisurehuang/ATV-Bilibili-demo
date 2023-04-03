@@ -13,35 +13,70 @@ import SwiftyJSON
 import SwiftyXMLParser
 import UIKit
 
+struct PlayInfo {
+    let aid: Int
+    var cid: Int? = 0
+    var isBangumi: Bool = false
+
+    var isCidVaild: Bool {
+        return cid ?? 0 > 0
+    }
+}
+
+class VideoNextProvider {
+    init(seq: [PlayInfo]) {
+        playSeq = seq
+    }
+
+    private var index = 1
+    private let playSeq: [PlayInfo]
+    func reset() {
+        index = 0
+    }
+
+    func getNext() -> PlayInfo? {
+        index += 1
+        if index < playSeq.count {
+            return playSeq[index]
+        }
+        return nil
+    }
+}
+
 class VideoPlayerViewController: CommonPlayerViewController {
-    var cid: Int?
-    var aid: Int!
+    var playInfo: PlayInfo
+    init(playInfo: PlayInfo) {
+        self.playInfo = playInfo
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     var data: VideoDetail?
+    var nextProvider: VideoNextProvider?
     private var allDanmus = [Danmu]()
     private var playingDanmus = [Danmu]()
     private var playerDelegate: BilibiliVideoResourceLoaderDelegate?
     private let danmuProvider = VideoDanmuProvider()
-
+    private var clipInfos: [VideoPlayURLInfo.ClipInfo]?
+    private var skipAction: UIAction?
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         guard let currentTime = player?.currentTime().seconds, currentTime > 0 else { return }
 
-        if let aid = aid, let cid = cid, cid > 0 {
-            WebRequest.reportWatchHistory(aid: aid, cid: cid, currentTime: Int(currentTime))
+        if let cid = playInfo.cid, cid > 0 {
+            WebRequest.reportWatchHistory(aid: playInfo.aid, cid: cid, currentTime: Int(currentTime))
         }
         BiliBiliUpnpDMR.shared.sendStatus(status: .stop)
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        ensureCid {
-            [weak self] in
-            guard let self = self else { return }
-            Task {
-                await self.fetchVideoData()
-            }
-            self.danmuProvider.cid = self.cid
-            self.danmuProvider.fetchDanmuData()
+        Task {
+            await initPlayer()
         }
         danmuProvider.onShowDanmu = {
             [weak self] in
@@ -49,22 +84,36 @@ class VideoPlayerViewController: CommonPlayerViewController {
         }
     }
 
+    private func initPlayer() async {
+        if !playInfo.isCidVaild {
+            do {
+                playInfo.cid = try await WebRequest.requestCid(aid: playInfo.aid)
+            } catch let err {
+                self.showErrorAlertAndExit(message: "请求cid失败,\(err.localizedDescription)")
+            }
+        }
+        await fetchVideoData()
+        danmuProvider.reset()
+        danmuProvider.cid = playInfo.cid
+        danmuProvider.fetchDanmuData()
+    }
+
     private func playmedia(urlInfo: VideoPlayURLInfo, playerInfo: PlayerInfo?) async {
         let playURL = URL(string: BilibiliVideoResourceLoaderDelegate.URLs.play)!
         let headers: [String: String] = [
             "User-Agent": "Bilibili/APPLE TV",
-            "Referer": "https://www.bilibili.com/video/av\(aid!)",
+            "Referer": "https://www.bilibili.com/video/av\(playInfo.aid)",
         ]
         let asset = AVURLAsset(url: playURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         playerDelegate = BilibiliVideoResourceLoaderDelegate()
-        playerDelegate?.setBilibili(info: urlInfo, subtitles: playerInfo?.subtitle?.subtitles ?? [], aid: aid)
+        playerDelegate?.setBilibili(info: urlInfo, subtitles: playerInfo?.subtitle?.subtitles ?? [], aid: playInfo.aid)
         asset.resourceLoader.setDelegate(playerDelegate, queue: DispatchQueue(label: "loader"))
         let requestedKeys = ["playable"]
         await asset.loadValues(forKeys: requestedKeys)
         prepare(toPlay: asset, withKeys: requestedKeys)
         danMuView.play()
         updatePlayerCharpter(playerInfo: playerInfo)
-        BiliBiliUpnpDMR.shared.sendVideoSwitch(aid: aid, cid: cid ?? 0, title: data?.title ?? "")
+        BiliBiliUpnpDMR.shared.sendVideoSwitch(aid: playInfo.aid, cid: playInfo.cid ?? 0)
     }
 
     private func updatePlayerCharpter(playerInfo: PlayerInfo?) {
@@ -88,6 +137,13 @@ class VideoPlayerViewController: CommonPlayerViewController {
         return playerDelegate?.infoDebugText ?? "-"
     }
 
+    override func additionDebugInfo() -> String {
+        if let port = playerDelegate?.httpPort.string() {
+            return " :" + port
+        }
+        return ""
+    }
+
     override func playerStatusDidChange() {
         super.playerStatusDidChange()
         switch player?.status {
@@ -100,9 +156,30 @@ class VideoPlayerViewController: CommonPlayerViewController {
         }
     }
 
-    override func playerDidFinishPlaying() {
+    func playNext() -> Bool {
+        if let next = nextProvider?.getNext() {
+            playInfo = next
+            Task {
+                await initPlayer()
+            }
+            return true
+        }
+        return false
+    }
+
+    override func playDidEnd() {
         BiliBiliUpnpDMR.shared.sendStatus(status: .end)
-        dismiss(animated: true)
+        if !playNext() {
+            if Settings.loopPlay {
+                nextProvider?.reset()
+                if !playNext() {
+                    playerItem?.seek(to: .zero, completionHandler: nil)
+                    player?.play()
+                }
+                return
+            }
+            dismiss(animated: true)
+        }
     }
 
     private func convertTimedMetadataGroup(viewPoint: PlayerInfo.ViewPoint, onResult: ((AVTimedMetadataGroup) -> Void)? = nil) {
@@ -139,11 +216,19 @@ class VideoPlayerViewController: CommonPlayerViewController {
 
 extension VideoPlayerViewController {
     func fetchVideoData() async {
-        let info = try? await WebRequest.requestPlayerInfo(aid: aid, cid: cid!)
-        let startTime = info?.playTimeInSecond
+        assert(playInfo.isCidVaild)
+        let aid = playInfo.aid
+        let cid = playInfo.cid!
+        let info = try? await WebRequest.requestPlayerInfo(aid: aid, cid: cid)
         do {
-            let playData = try await WebRequest.requestPlayUrl(aid: aid, cid: cid!)
-            if let startTime = startTime, playData.dash.duration - startTime > 5, Settings.continuePlay {
+            let playData: VideoPlayURLInfo
+            if playInfo.isBangumi {
+                playData = try await WebRequest.requestPcgPlayUrl(aid: aid, cid: cid)
+                clipInfos = playData.clip_info_list
+            } else {
+                playData = try await WebRequest.requestPlayUrl(aid: aid, cid: cid)
+            }
+            if info?.last_play_cid == cid, let startTime = info?.playTimeInSecond, playData.dash.duration - startTime > 5, Settings.continuePlay {
                 playerStartPos = startTime
             }
 
@@ -154,7 +239,7 @@ extension VideoPlayerViewController {
                    let video = playData.dash.video.first,
                    let fps = info?.dm_mask?.fps, fps > 0
                 {
-                    maskProvider = BMaskProvider(info: mask, videoSize: CGSize(width: video.width ?? 0, height: video.height ?? 0), duration: playData.dash.duration)
+                    maskProvider = BMaskProvider(info: mask, videoSize: CGSize(width: video.width ?? 0, height: video.height ?? 0))
                 } else if Settings.vnMask {
                     maskProvider = VMaskProvider()
                 }
@@ -162,7 +247,7 @@ extension VideoPlayerViewController {
             }
 
             if data == nil {
-                data = try? await WebRequest.requestDetailVideo(aid: aid!)
+                data = try? await WebRequest.requestDetailVideo(aid: aid)
             }
             setPlayerInfo(title: data?.title, subTitle: data?.ownerName, desp: data?.View.desc, pic: data?.pic)
         } catch let err {
@@ -170,27 +255,6 @@ extension VideoPlayerViewController {
                 showErrorAlertAndExit(message: "请求失败\(code) \(message)，可能需要大会员")
             } else {
                 showErrorAlertAndExit(message: "请求失败,\(err)")
-            }
-        }
-    }
-
-    func ensureCid(callback: (() -> Void)? = nil) {
-        if let cid = cid, cid > 0 {
-            callback?()
-            return
-        }
-        AF.request("https://api.bilibili.com/x/player/pagelist?aid=\(aid!)&jsonp=jsonp").responseData {
-            [weak self] resp in
-            guard let self = self else { return }
-            switch resp.result {
-            case let .success(data):
-                let json = JSON(data)
-                let cid = json["data"][0]["cid"].intValue
-                self.cid = cid
-                callback?()
-            case let .failure(err):
-                self.showErrorAlertAndExit(message: "请求cid失败")
-                print(err)
             }
         }
     }
@@ -221,10 +285,40 @@ extension VideoPlayerViewController {
         playerItem = AVPlayerItem(asset: asset)
         player = AVPlayer(playerItem: playerItem)
         player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
-            self?.danmuProvider.playerTimeChange(time: time.seconds)
+            guard let self else { return }
+            let seconds = time.seconds
+            self.danmuProvider.playerTimeChange(time: seconds)
 
-            if let duration = self?.data?.View.duration {
-                BiliBiliUpnpDMR.shared.sendProgress(duration: duration, current: Int(time.seconds))
+            if let duration = self.data?.View.duration {
+                BiliBiliUpnpDMR.shared.sendProgress(duration: duration, current: Int(seconds))
+            }
+
+            if let clipInfos = self.clipInfos {
+                var matched = false
+                for clip in clipInfos {
+                    if seconds > clip.start, seconds < clip.end {
+                        let action = {
+                            clip.skipped = true
+                            self.player?.seek(to: CMTime(seconds: Double(clip.end), preferredTimescale: 1), toleranceBefore: .zero, toleranceAfter: .zero)
+                        }
+                        if !(clip.skipped ?? false), Settings.autoSkip {
+                            action()
+                            self.skipAction = nil
+                        } else if self.skipAction?.accessibilityLabel != clip.a11Tag {
+                            self.skipAction = UIAction(title: clip.customText) { _ in
+                                action()
+                            }
+                            self.skipAction?.accessibilityLabel = clip.a11Tag
+                        }
+
+                        self.contextualActions = [self.skipAction].compactMap { $0 }
+                        matched = true
+                        break
+                    }
+                }
+                if !matched {
+                    self.contextualActions = []
+                }
             }
         }
     }

@@ -17,7 +17,7 @@ class BiliBiliUpnpDMR: NSObject {
     private var udp: GCDAsyncUdpSocket!
     private var httpServer = HttpServer()
     private var connectedSockets = [GCDAsyncSocket]()
-    private var sessions = Set<NVASession>()
+    @MainActor private var sessions = Set<NVASession>()
     private var udpStarted = false
     private var ip: String?
 
@@ -54,19 +54,24 @@ class BiliBiliUpnpDMR: NSObject {
     override private init() { super.init() }
     func start() {
         startUdpIfNeed()
-        try? httpServer.start(9958)
         NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
 
         httpServer["/description.xml"] = { [weak self] req in
-            print("handel serverInfo")
+            Logger.debug("handel serverInfo")
             return HttpResponse.ok(.text(self?.serverInfo ?? ""))
         }
 
         httpServer["projection"] = nvasocket(uuid: bUuid, didConnect: { [weak self] session in
-            self?.sessions.insert(session)
+            Logger.info("session connected", session)
+            DispatchQueue.main.async {
+                self?.sessions.insert(session)
+            }
         }, didDisconnect: { [weak self] session in
-            self?.sessions.remove(session)
+            Logger.info("session disconnect", session)
+            DispatchQueue.main.async {
+                self?.sessions.remove(session)
+            }
         }, processor: { [weak self] session, frame in
             DispatchQueue.main.async {
                 self?.handleEvent(frame: frame, session: session)
@@ -75,14 +80,14 @@ class BiliBiliUpnpDMR: NSObject {
 
         httpServer["/dlna/NirvanaControl.xml"] = {
             [weak self] req in
-            print("handle NirvanaControl")
+            Logger.debug("handle NirvanaControl")
             let txt = self?.nirvanaControl ?? ""
             return HttpResponse.ok(.text(txt))
         }
 
         httpServer.get["/dlna/AVTransport.xml"] = {
             [weak self] req in
-            print("handle AVTransport.xml")
+            Logger.debug("handle AVTransport.xml")
             let txt = self?.avTransportScpd ?? ""
             return HttpResponse.ok(.text(txt))
         }
@@ -90,7 +95,7 @@ class BiliBiliUpnpDMR: NSObject {
         httpServer.post["/AVTransport/action"] = {
             req in
             let str = String(data: Data(req.body), encoding: .utf8) ?? ""
-            print("handle AVTransport.xml", str)
+            Logger.debug("handle AVTransport.xml \(str)")
             return HttpResponse.ok(.text(str))
         }
 
@@ -98,14 +103,43 @@ class BiliBiliUpnpDMR: NSObject {
             req in
             return HttpResponse.internalServerError(nil)
         }
+
+        httpServer["/debug/log"] = {
+            req in
+            if let path = Logger.latestLogPath(),
+               let str = try? String(contentsOf: URL(fileURLWithPath: path))
+            {
+                return HttpResponse.ok(.text(str))
+            }
+            return HttpResponse.internalServerError(nil)
+        }
+
+        httpServer["/debug/old"] = {
+            req in
+            if let path = Logger.oldestLogPath(),
+               let str = try? String(contentsOf: URL(fileURLWithPath: path))
+            {
+                return HttpResponse.ok(.text(str))
+            }
+            return HttpResponse.internalServerError(nil)
+        }
+    }
+
+    func stop() {
+        udp?.close()
+        httpServer.stop()
+        udpStarted = false
+        Logger.info("dmr stopped")
     }
 
     @objc func didEnterBackground() {
-        startUdpIfNeed()
+        stop()
     }
 
     @objc func willEnterForeground() {
-        udp?.close()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.startUdpIfNeed()
+        }
     }
 
     private func startUdpIfNeed() {
@@ -114,13 +148,14 @@ class BiliBiliUpnpDMR: NSObject {
             do {
                 udp = GCDAsyncUdpSocket(delegate: self, delegateQueue: DispatchQueue.main)
                 try udp.enableBroadcast(true)
-                try udp.enableReusePort(true)
                 try udp.bind(toPort: 1900)
                 try udp.joinMulticastGroup("239.255.255.250")
                 try udp.beginReceiving()
+                try httpServer.start(9958)
                 udpStarted = true
+                Logger.info("dmr started")
             } catch let err {
-                print(err)
+                Logger.warn("dmr start fail", err.localizedDescription)
             }
         }
     }
@@ -136,10 +171,13 @@ class BiliBiliUpnpDMR: NSObject {
                 let addrFamily = interface.ifa_addr.pointee.sa_family
                 if addrFamily == UInt8(AF_INET) {
                     let name = String(cString: interface.ifa_name)
-                    if name == "en0" || name == "en2" || name == "en3" || name == "en4" {
+                    if name == "en0" || name == "en1" || name == "en2" || name == "en3" || name == "en4" {
                         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                         getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST)
                         address = String(cString: hostname)
+                        if name == "en0" {
+                            break
+                        }
                     }
                 }
             }
@@ -150,7 +188,7 @@ class BiliBiliUpnpDMR: NSObject {
 
     private func getSSDPResp() -> String {
         guard let ip = ip ?? getIPAddress() else {
-            print("no ip")
+            Logger.debug("no ip")
             return ""
         }
         let formatter = DateFormatter()
@@ -177,23 +215,7 @@ class BiliBiliUpnpDMR: NSObject {
         case "GetVolume":
             session.sendReply(content: ["volume": 30])
         case "Play":
-            let json = JSON(parseJSON: frame.body)
-            let aid = json["aid"].intValue
-            let cid = json["cid"].intValue
-            let epid = json["epid"].intValue
-            let player: VideoDetailViewController
-            if epid > 0 {
-                player = VideoDetailViewController.create(epid: epid)
-            } else {
-                player = VideoDetailViewController.create(aid: aid, cid: cid)
-            }
-            if let _ = AppDelegate.shared.window!.rootViewController?.presentedViewController {
-                AppDelegate.shared.window!.rootViewController?.dismiss(animated: false) {
-                    player.present(from: UIViewController.topMostViewController(), direatlyEnterVideo: true)
-                }
-            } else {
-                player.present(from: topMost, direatlyEnterVideo: true)
-            }
+            handlePlay(json: JSON(parseJSON: frame.body))
             session.sendEmpty()
         case "Pause":
             (topMost as? VideoPlayerViewController)?.player?.pause()
@@ -212,9 +234,41 @@ class BiliBiliUpnpDMR: NSObject {
         case "Stop":
             (topMost as? VideoPlayerViewController)?.dismiss(animated: true)
             session.sendEmpty()
-        default:
-            print("action:", frame.action)
+        case "PlayUrl":
+            let json = JSON(parseJSON: frame.body)
             session.sendEmpty()
+            guard let url = json["url"].url,
+                  let extStr = URLComponents(string: url.absoluteString)?.queryItems?
+                  .first(where: { $0.name == "nva_ext" })?.value
+            else {
+                Logger.warn("get play url: ", frame.body)
+                return
+            }
+            let ext = JSON(parseJSON: extStr)
+            handlePlay(json: ext["content"])
+        default:
+            Logger.debug("action:", frame.action)
+            session.sendEmpty()
+        }
+    }
+
+    func handlePlay(json: JSON) {
+        let topMost = UIViewController.topMostViewController()
+        let aid = json["aid"].intValue
+        let cid = json["cid"].intValue
+        let epid = json["epid"].intValue
+        let player: VideoDetailViewController
+        if epid > 0 {
+            player = VideoDetailViewController.create(epid: epid)
+        } else {
+            player = VideoDetailViewController.create(aid: aid, cid: cid)
+        }
+        if let _ = AppDelegate.shared.window!.rootViewController?.presentedViewController {
+            AppDelegate.shared.window!.rootViewController?.dismiss(animated: false) {
+                player.present(from: UIViewController.topMostViewController(), direatlyEnterVideo: true)
+            }
+        } else {
+            player.present(from: topMost, direatlyEnterVideo: true)
         }
     }
 
@@ -226,20 +280,33 @@ class BiliBiliUpnpDMR: NSObject {
         case stop = 7
     }
 
-    func sendStatus(status: PlayStatus) {
-        print("send status:", status)
+    @MainActor func sendStatus(status: PlayStatus) {
+        Logger.debug("send status:", status)
         Array(sessions).forEach { $0.sendCommand(action: "OnPlayState", content: ["playState": status.rawValue]) }
     }
 
-    func sendProgress(duration: Int, current: Int) {
+    @MainActor func sendProgress(duration: Int, current: Int) {
         Array(sessions).forEach { $0.sendCommand(action: "OnProgress", content: ["duration": duration, "position": current]) }
     }
 
-    func sendVideoSwitch(aid: Int, cid: Int, title: String) {
-        // causing client crash
-//        let playItem = ["aid": "\(aid)", "cid": "\(cid)", "contentType": "1", "epId": "0", "seasonId": "0"] as [String: Any]
-//        let data = ["playItem": playItem, "qnDesc": "112", "title": title] as [String: Any]
-//        Array(sessions).forEach { $0.sendCommand(action: "OnEpisodeSwitch", content: data) }
+    func sendVideoSwitch(aid: Int, cid: Int) {
+        /* this might cause client disconnect for unkown reason
+         let playItem = ["aid": aid, "cid": cid, "contentType": 0, "epId": 0, "seasonId": 0, "roomId": 0] as [String: Any]
+         let mockQnDesc = ["curQn": 0,
+                           "supportQnList": [
+                               [
+                                   "description": "",
+                                   "displayDesc": "",
+                                   "needLogin": false,
+                                   "needVip": false,
+                                   "quality": 0,
+                                   "superscript": "",
+                               ],
+                           ],
+                           "userDesireQn": 0] as [String: Any]
+         let data = ["playItem": playItem, "qnDesc": mockQnDesc, "title": "null"] as [String: Any]
+         Array(sessions).forEach { $0.sendCommand(action: "OnEpisodeSwitch", content: data) }
+          */
     }
 }
 
@@ -257,7 +324,7 @@ extension BiliBiliUpnpDMR: GCDAsyncUdpSocketDelegate {
         ipAddress = ipAddress.replacingOccurrences(of: "::ffff:", with: "")
         let str = String(data: data, encoding: .utf8)
         if str?.contains("ssdp:discover") == true {
-            print("handle ssdp discover from:", ipAddress)
+            Logger.debug("handle ssdp discover from: \(ipAddress)")
             let data = getSSDPResp().data(using: .utf8)!
             sock.send(data, toAddress: address, withTimeout: -1, tag: 0)
         }
