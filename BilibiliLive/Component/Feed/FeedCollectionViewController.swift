@@ -88,11 +88,17 @@ class FeedCollectionViewController: UIViewController {
     }
 
     func appendData(displayData: [any DisplayData]) {
-        _displayData.append(contentsOf: displayData.map { AnyDispplayData(data: $0) }.filter({ !_displayData.contains($0) }))
-        if displayData.count < pageSize - 5 {
-            finished = true
-        }
         isLoading = false
+        _displayData.append(contentsOf: displayData.map { AnyDispplayData(data: $0) }.filter({ !_displayData.contains($0) }))
+        if displayData.count < pageSize - 5 || displayData.count == 0 {
+            finished = true
+            return
+        }
+
+        if _displayData.count < 12 {
+            isLoading = true
+            loadMore?()
+        }
     }
 
     override func viewDidLoad() {
@@ -116,10 +122,7 @@ class FeedCollectionViewController: UIViewController {
     }
 
     private var selfSizeingEnable: Bool {
-        if #available(tvOS 16.0, *) {
-            return true
-        }
-        return false
+        true
     }
 
     private func makeGridLayoutSection() -> NSCollectionLayoutSection {

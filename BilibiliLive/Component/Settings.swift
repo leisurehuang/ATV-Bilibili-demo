@@ -5,7 +5,9 @@
 //  Created by whw on 2022/10/19.
 //
 
+import Combine
 import Foundation
+import SwiftUI
 
 enum FeedDisplayStyle: Codable, CaseIterable {
     case large
@@ -15,6 +17,13 @@ enum FeedDisplayStyle: Codable, CaseIterable {
     var hideInSetting: Bool {
         self == .sideBar
     }
+}
+
+class Defaults {
+    static let shared = Defaults()
+    private init() {}
+
+    @Published(key: "Settings.danmuStatus") var showDanmu = true
 }
 
 enum Settings {
@@ -33,14 +42,17 @@ enum Settings {
     @UserDefaultCodable("Settings.danmuSize", defaultValue: .size_36)
     static var danmuSize: DanmuSize
 
+    @UserDefaultCodable("Settings.danmuAILevel", defaultValue: 1)
+    static var danmuAILevel: Int32
+
+    @UserDefaultCodable("Settings.danmuDuration", defaultValue: 8)
+    static var danmuDuration: Double
+
     @UserDefault("Settings.losslessAudio", defaultValue: false)
     static var losslessAudio: Bool
 
-    @UserDefault("Settings.preferHevc", defaultValue: false)
-    static var preferHevc: Bool
-
-    @UserDefault("Settings.defaultDanmuStatus", defaultValue: true)
-    static var defaultDanmuStatus: Bool
+    @UserDefault("Settings.preferAvc", defaultValue: false)
+    static var preferAvc: Bool
 
     @UserDefault("Settings.danmuMask", defaultValue: true)
     static var danmuMask: Bool
@@ -54,11 +66,17 @@ enum Settings {
     @UserDefault("Settings.contentMatch", defaultValue: true)
     static var contentMatch: Bool
 
+    @UserDefault("Settings.contentMatchOnlyInHDR", defaultValue: true)
+    static var contentMatchOnlyInHDR: Bool
+
     @UserDefault("Settings.continuePlay", defaultValue: true)
     static var continuePlay: Bool
 
     @UserDefault("DLNA.uuid", defaultValue: "")
     static var uuid: String
+
+    @UserDefault("DLNA.enable", defaultValue: true)
+    static var enableDLNA: Bool
 
     @UserDefault("Settings.continouslyPlay", defaultValue: true)
     static var continouslyPlay: Bool
@@ -71,11 +89,43 @@ enum Settings {
 
     @UserDefault("Settings.showRelatedVideoInCurrentVC", defaultValue: true)
     static var showRelatedVideoInCurrentVC: Bool
+
+    @UserDefault("Settings.requestHotWithoutCookie", defaultValue: false)
+    static var requestHotWithoutCookie: Bool
+
+    @UserDefault("Settings.arealimit.unlock", defaultValue: false)
+    static var areaLimitUnlock: Bool
+
+    @UserDefault("Settings.arealimit.customServer", defaultValue: "")
+    static var areaLimitCustomServer: String
+
+    @UserDefault("Settings.ui.sideMenuAutoSelectChange", defaultValue: false)
+    static var sideMenuAutoSelectChange: Bool
+
+    @UserDefaultCodable("Settings.SponsorBlockType", defaultValue: SponsorBlockType.none)
+    static var enableSponsorBlock: SponsorBlockType
 }
 
 struct MediaQuality {
     var qn: Int
     var fnval: Int
+}
+
+enum SponsorBlockType: String, Codable, CaseIterable {
+    case none
+    case jump
+    case tip
+
+    var title: String {
+        switch self {
+        case .none:
+            return "关"
+        case .jump:
+            return "自动跳过"
+        case .tip:
+            return "手动跳过"
+        }
+    }
 }
 
 enum DanmuArea: Codable, CaseIterable {

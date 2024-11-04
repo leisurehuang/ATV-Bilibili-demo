@@ -11,9 +11,9 @@ extension FeedDisplayStyle {
     var desp: String {
         switch self {
         case .large:
-            return "3行"
+            return "3个"
         case .normal:
-            return "4行"
+            return "4个"
         case .sideBar:
             return "-"
         }
@@ -35,12 +35,21 @@ class SettingsViewController: UIViewController {
 
     func setupData() {
         cellModels.removeAll()
-        let directlyVideo = CellModel(title: "直接进入视频", desp: Settings.direatlyEnterVideo ? "开" : "关") {
+        let directlyVideo = CellModel(title: "不显示详情页直接进入视频", desp: Settings.direatlyEnterVideo ? "开" : "关") {
             [weak self] in
             Settings.direatlyEnterVideo.toggle()
             self?.setupData()
         }
         cellModels.append(directlyVideo)
+
+        let dlanEnable = CellModel(title: "启用投屏", desp: Settings.enableDLNA ? "开" : "关") {
+            [weak self] in
+            Settings.enableDLNA.toggle()
+            self?.setupData()
+            BiliBiliUpnpDMR.shared.start()
+        }
+        cellModels.append(dlanEnable)
+
         let cancelAction = UIAlertAction(title: nil, style: .cancel)
         let dmStyle = CellModel(title: "弹幕显示区域", desp: Settings.danmuArea.title) { [weak self] in
             let alert = UIAlertController(title: "弹幕显示区域", message: "设置弹幕显示区域", preferredStyle: .actionSheet)
@@ -56,7 +65,7 @@ class SettingsViewController: UIViewController {
         }
         cellModels.append(dmStyle)
 
-        let style = CellModel(title: "时间线显示模式", desp: Settings.displayStyle.desp) { [weak self] in
+        let style = CellModel(title: "视频每行显示个数", desp: Settings.displayStyle.desp) { [weak self] in
             let alert = UIAlertController(title: "显示模式", message: "重启app生效", preferredStyle: .actionSheet)
             for style in FeedDisplayStyle.allCases.filter({ !$0.hideInSetting }) {
                 let action = UIAlertAction(title: style.desp, style: .default) { _ in
@@ -85,7 +94,19 @@ class SettingsViewController: UIViewController {
         }
         cellModels.append(relatedVideoLoadMode)
 
-        let continuePlay = CellModel(title: "继续播放", desp: Settings.continuePlay ? "开" : "关") {
+        let hotWithoutCookie = CellModel(title: "热门个性化推荐", desp: Settings.requestHotWithoutCookie ? "关" : "开") {
+            [weak self] in
+            Settings.requestHotWithoutCookie.toggle()
+            self?.setupData()
+        }
+        cellModels.append(hotWithoutCookie)
+
+        let sponsorBlock = cellModelWithActions(title: "空降助手广告屏蔽", message: "", current: Settings.enableSponsorBlock.title, options: SponsorBlockType.allCases, optionString: SponsorBlockType.allCases.map({ $0.title })) {
+            Settings.enableSponsorBlock = $0
+        }
+        cellModels.append(sponsorBlock)
+
+        let continuePlay = CellModel(title: "从上次退出的位置继续播放", desp: Settings.continuePlay ? "开" : "关") {
             [weak self] in
             Settings.continuePlay.toggle()
             self?.setupData()
@@ -119,9 +140,9 @@ class SettingsViewController: UIViewController {
         }
         cellModels.append(losslessAudio)
 
-        let hevc = CellModel(title: "Hevc优先", desp: Settings.preferHevc ? "开" : "关") {
+        let hevc = CellModel(title: "Avc优先(卡顿尝试开启)", desp: Settings.preferAvc ? "开" : "关") {
             [weak self] in
-            Settings.preferHevc.toggle()
+            Settings.preferAvc.toggle()
             self?.setupData()
         }
         cellModels.append(hevc)
@@ -159,6 +180,32 @@ class SettingsViewController: UIViewController {
         }
         cellModels.append(match)
 
+        let matchHdrOnly = CellModel(title: "仅在HDR视频匹配视频内容", desp: Settings.contentMatchOnlyInHDR ? "开" : "关") {
+            [weak self] in
+            Settings.contentMatchOnlyInHDR.toggle()
+            self?.setupData()
+        }
+        cellModels.append(matchHdrOnly)
+
+        let sideMenuAutoSelectChange = CellModel(title: "侧边栏菜单自动切换", desp: Settings.sideMenuAutoSelectChange ? "开" : "关") {
+            [weak self] in
+            Settings.sideMenuAutoSelectChange.toggle()
+            self?.setupData()
+        }
+        cellModels.append(sideMenuAutoSelectChange)
+
+        let areaLimitUnlock = CellModel(title: "解锁港澳台番剧限制", desp: Settings.areaLimitUnlock ? "开" : "关") {
+            [weak self] in
+            Settings.areaLimitUnlock.toggle()
+            self?.setupData()
+        }
+        cellModels.append(areaLimitUnlock)
+
+        let areaLimitCustomServer = cellModelWithTextField(title: "设置港澳台解析服务器", message: "为了安全考虑建议自建服务器，公共服务器可用性难保证，请多尝试几个。\n公共服务器请参考：http://985.so/mjq9u", current: Settings.areaLimitCustomServer, placeholder: "api.example.com") {
+            Settings.areaLimitCustomServer = $0 ?? ""
+        }
+        cellModels.append(areaLimitCustomServer)
+
         collectionView.reloadData()
     }
 
@@ -179,6 +226,34 @@ class SettingsViewController: UIViewController {
                 }
                 alert.addAction(action)
             }
+            let cancelAction = UIAlertAction(title: nil, style: .cancel)
+            alert.addAction(cancelAction)
+            self?.present(alert, animated: true)
+        }
+    }
+
+    func cellModelWithTextField(title: String,
+                                message: String?,
+                                current: String,
+                                placeholder: String?,
+                                isSecureTextEntry: Bool = false,
+                                onSubmit: ((String?) -> Void)? = nil) -> CellModel
+    {
+        return CellModel(title: title, desp: current) { [weak self] in
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addTextField { textField in
+                textField.text = current
+                textField.keyboardType = .URL
+                textField.placeholder = placeholder
+                textField.isSecureTextEntry = isSecureTextEntry
+            }
+
+            let action = UIAlertAction(title: "确定", style: .default) { _ in
+                onSubmit?(alert.textFields![0].text)
+                self?.setupData()
+            }
+            alert.addAction(action)
+
             let cancelAction = UIAlertAction(title: nil, style: .cancel)
             alert.addAction(cancelAction)
             self?.present(alert, animated: true)
@@ -213,4 +288,19 @@ extension SettingsViewController: UICollectionViewDataSource {
 class SettingsSwitchCell: UICollectionViewCell {
     @IBOutlet var titleLabel: UILabel!
     @IBOutlet var descLabel: UILabel!
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        if traitCollection.userInterfaceStyle == .dark {
+            if isFocused {
+                titleLabel.textColor = UIColor.black
+                descLabel.textColor = UIColor.black
+            } else {
+                titleLabel.textColor = UIColor.white
+                descLabel.textColor = UIColor.white
+            }
+        } else {
+            titleLabel.textColor = .black
+            descLabel.textColor = UIColor.black
+        }
+    }
 }

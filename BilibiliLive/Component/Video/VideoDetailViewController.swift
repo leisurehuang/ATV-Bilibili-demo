@@ -6,6 +6,7 @@
 //
 
 import AVKit
+import Combine
 import Foundation
 import UIKit
 
@@ -43,6 +44,7 @@ class VideoDetailViewController: UIViewController {
     @IBOutlet var pageCollectionView: UICollectionView!
     @IBOutlet var recommandCollectionView: UICollectionView!
     @IBOutlet var replysCollectionView: UICollectionView!
+    @IBOutlet var repliesCollectionViewHeightConstraints: NSLayoutConstraint!
     @IBOutlet var ugcCollectionView: UICollectionView!
 
     @IBOutlet var pageView: UIView!
@@ -71,10 +73,13 @@ class VideoDetailViewController: UIViewController {
 
     private var allUgcEpisodes = [VideoDetail.Info.UgcSeason.UgcVideoInfo]()
 
-    static func create(aid: Int, cid: Int?) -> VideoDetailViewController {
+    private var subscriptions = [AnyCancellable]()
+
+    static func create(aid: Int, cid: Int?, epid: Int? = nil) -> VideoDetailViewController {
         let vc = UIStoryboard(name: "Main", bundle: .main).instantiateViewController(identifier: String(describing: self)) as! VideoDetailViewController
         vc.aid = aid
         vc.cid = cid ?? 0
+        vc.epid = epid ?? 0
         return vc
     }
 
@@ -125,6 +130,11 @@ class VideoDetailViewController: UIViewController {
             focusGuide.bottomAnchor.constraint(equalTo: actionButtonSpaceView.bottomAnchor),
         ])
         focusGuide.preferredFocusEnvironments = [dislikeButton]
+
+        replysCollectionView.publisher(for: \.contentSize).sink { [weak self] newSize in
+            self?.repliesCollectionViewHeightConstraints.constant = newSize.height
+            self?.view.setNeedsLayout()
+        }.store(in: &subscriptions)
     }
 
     override var preferredFocusedView: UIView? {
@@ -146,7 +156,7 @@ class VideoDetailViewController: UIViewController {
         } else {
             vc.present(self, animated: false) { [weak self] in
                 guard let self else { return }
-                let player = VideoPlayerViewController(playInfo: PlayInfo(aid: self.aid, cid: self.cid))
+                let player = VideoPlayerViewController(playInfo: PlayInfo(aid: self.aid, cid: self.cid, epid: self.epid, isBangumi: self.isBangumi))
                 self.present(player, animated: true)
             }
         }
@@ -176,8 +186,9 @@ class VideoDetailViewController: UIViewController {
                 if let epi = info.main_section.episodes.first ?? info.section.first?.episodes.first {
                     aid = epi.aid
                     cid = epi.cid
+                    epid = epi.id
                 }
-                pages = info.main_section.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, from: "", part: $0.title) })
+                pages = info.main_section.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, epid: $0.id, from: "", part: $0.title + " " + $0.long_title) })
             } else if epid > 0 {
                 isBangumi = true
                 let info = try await WebRequest.requestBangumiInfo(epid: epid)
@@ -187,7 +198,7 @@ class VideoDetailViewController: UIViewController {
                 } else {
                     throw NSError(domain: "get epi fail", code: -1)
                 }
-                pages = info.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, from: "", part: $0.title) })
+                pages = info.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, epid: $0.id, from: "", part: $0.title + " " + $0.long_title) })
             }
             let data = try await WebRequest.requestDetailVideo(aid: aid)
             self.data = data
@@ -196,11 +207,18 @@ class VideoDetailViewController: UIViewController {
                 isBangumi = true
                 epid = id
                 let info = try await WebRequest.requestBangumiInfo(epid: epid)
-                pages = info.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, from: "", part: $0.title + " " + $0.long_title) })
+                pages = info.episodes.map({ VideoPage(cid: $0.cid, page: $0.aid, epid: $0.id, from: "", part: $0.title + " " + $0.long_title) })
             }
             update(with: data)
         } catch let err {
-            self.exit(with: err)
+            if case let .statusFail(code, _) = err as? RequestError, code == -404 {
+                // 解锁港澳台番剧处理
+                if let ok = await fetchAreaLimitBangumiData(), !ok {
+                    self.exit(with: err)
+                }
+            } else {
+                self.exit(with: err)
+            }
         }
 
         WebRequest.requestReplys(aid: aid) { [weak self] replys in
@@ -225,6 +243,42 @@ class VideoDetailViewController: UIViewController {
         WebRequest.requestFavoriteStatus(aid: aid) { [weak self] isFavorited in
             self?.favButton.isOn = isFavorited
         }
+    }
+
+    private func fetchAreaLimitBangumiData() async -> Bool? {
+        guard Settings.areaLimitUnlock else { return false }
+
+        do {
+            var info: ApiRequest.BangumiInfo?
+
+            if seasonId > 0 {
+                info = try await ApiRequest.requestBangumiInfo(seasonID: seasonId)
+            } else if epid > 0 {
+                info = try await ApiRequest.requestBangumiInfo(epid: epid)
+            }
+            guard let info = info else { return false }
+
+            let season = try await WebRequest.requestBangumiSeasonView(seasonID: info.season_id)
+            isBangumi = true
+            if let epi = season.episodes.first(where: { $0.ep_id == epid }) ?? season.episodes.first {
+                aid = epi.aid
+                cid = epi.cid
+                pages = season.episodes.filter { $0.section_type == 0 }.map({ VideoPage(cid: $0.cid, page: $0.aid, epid: $0.ep_id, from: "", part: $0.index + " " + ($0.index_title ?? "")) })
+
+                let userEpisodeInfo = try await WebRequest.requestUserEpisodeInfo(epid: epi.ep_id)
+
+                let data = VideoDetail(View: VideoDetail.Info(aid: aid, cid: cid, title: info.title, videos: nil, pic: epi.cover, desc: info.evaluate, owner: VideoOwner(mid: season.up_info.mid, name: season.up_info.uname, face: season.up_info.avatar), pages: nil, dynamic: nil, bvid: epi.bvid, duration: epi.durationSeconds, pubdate: epi.pubdate, ugc_season: nil, redirect_url: nil, stat: VideoDetail.Info.Stat(favorite: info.stat.favorites, coin: info.stat.coins, like: info.stat.likes, share: info.stat.share, danmaku: info.stat.danmakus, view: info.stat.views)), Related: [], Card: VideoDetail.Owner(following: userEpisodeInfo.related_up.first?.is_follow == 1, follower: season.up_info.follower))
+
+                self.data = data
+                update(with: data)
+                return true
+            }
+
+        } catch let err {
+            print(err)
+        }
+
+        return false
     }
 
     private func update(with data: VideoDetail) {
@@ -275,8 +329,16 @@ class VideoDetailViewController: UIViewController {
         }
 
         if let season = data.View.ugc_season {
-            allUgcEpisodes = Array((season.sections.map { $0.episodes }.joined()))
+            if season.sections.count > 1 {
+                if let section = season.sections.first(where: { section in section.episodes.contains(where: { episode in episode.aid == data.View.aid }) }) {
+                    allUgcEpisodes = section.episodes
+                }
+            } else {
+                allUgcEpisodes = season.sections.first?.episodes ?? []
+            }
+            allUgcEpisodes.sort { $0.arc.ctime < $1.arc.ctime }
         }
+
         ugcCollectionView.reloadData()
         ugcLabel.text = "合集 \(data.View.ugc_season?.title ?? "")  \(data.View.ugc_season?.sections.first?.title ?? "")"
         ugcView.isHidden = allUgcEpisodes.count == 0
@@ -301,10 +363,10 @@ class VideoDetailViewController: UIViewController {
     }
 
     @IBAction func actionPlay(_ sender: Any) {
-        let player = VideoPlayerViewController(playInfo: PlayInfo(aid: aid, cid: cid, isBangumi: isBangumi))
+        let player = VideoPlayerViewController(playInfo: PlayInfo(aid: aid, cid: cid, epid: epid, isBangumi: isBangumi))
         player.data = data
         if pages.count > 0, let index = pages.firstIndex(where: { $0.cid == cid }) {
-            let seq = pages.dropFirst(index).map({ PlayInfo(aid: aid, cid: $0.cid, isBangumi: isBangumi) })
+            let seq = pages.dropFirst(index).map({ PlayInfo(aid: aid, cid: $0.cid, epid: $0.epid, isBangumi: isBangumi) })
             if seq.count > 0 {
                 let nextProvider = VideoNextProvider(seq: seq)
                 player.nextProvider = nextProvider
@@ -367,6 +429,12 @@ class VideoDetailViewController: UIViewController {
             guard let favList = try? await WebRequest.requestFavVideosList() else {
                 return
             }
+            if favButton.isOn {
+                favButton.title? -= 1
+                favButton.isOn = false
+                WebRequest.removeFavorite(aid: aid, mid: favList.map { $0.id })
+                return
+            }
             let alert = UIAlertController(title: "收藏", message: nil, preferredStyle: .actionSheet)
             let aid = aid
             for fav in favList {
@@ -392,7 +460,7 @@ extension VideoDetailViewController: UICollectionViewDelegate {
         switch collectionView {
         case pageCollectionView:
             let page = pages[indexPath.item]
-            let player = VideoPlayerViewController(playInfo: PlayInfo(aid: isBangumi ? page.page : aid, cid: page.cid, isBangumi: isBangumi))
+            let player = VideoPlayerViewController(playInfo: PlayInfo(aid: isBangumi ? page.page : aid, cid: page.cid, epid: page.epid, isBangumi: isBangumi))
             player.data = isBangumi ? nil : data
 
             let seq = pages.dropFirst(indexPath.item).map({ PlayInfo(aid: aid, cid: $0.cid, isBangumi: isBangumi) })
@@ -403,7 +471,7 @@ extension VideoDetailViewController: UICollectionViewDelegate {
             present(player, animated: true, completion: nil)
         case replysCollectionView:
             guard let reply = replys?.replies?[indexPath.item] else { return }
-            let detail = ContentDetailViewController.createReply(content: reply.content.message)
+            let detail = ReplyDetailViewController(reply: reply)
             present(detail, animated: true)
         case ugcCollectionView:
             let video = allUgcEpisodes[indexPath.item]
@@ -520,18 +588,6 @@ extension VideoDetailViewController {
             section.interGroupSpacing = 40
             return section
         }
-    }
-}
-
-class ReplyCell: UICollectionViewCell {
-    @IBOutlet var avatarImageView: UIImageView!
-    @IBOutlet var userNameLabel: UILabel!
-    @IBOutlet var contenLabel: UILabel!
-
-    func config(replay: Replys.Reply) {
-        avatarImageView.kf.setImage(with: URL(string: replay.member.avatar), options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 80, height: 80))), .processor(RoundCornerImageProcessor(radius: .widthFraction(0.5))), .cacheSerializer(FormatIndicatedCacheSerializer.png)])
-        userNameLabel.text = replay.member.uname
-        contenLabel.text = replay.content.message
     }
 }
 
