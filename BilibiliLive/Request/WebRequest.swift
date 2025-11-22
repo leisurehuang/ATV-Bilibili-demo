@@ -34,12 +34,13 @@ enum WebRequest {
         static let favFolderCollectedList = "https://api.bilibili.com/x/v3/fav/folder/collected/list"
         static let favSeason = "https://api.bilibili.com/x/space/fav/season/list"
         static let reportHistory = "https://api.bilibili.com/x/v2/history/report"
+        static let heartbeat = "https://api.bilibili.com/x/click-interface/web/heartbeat"
         static let upSpace = "https://api.bilibili.com/x/space/wbi/arc/search"
         static let like = "https://api.bilibili.com/x/web-interface/archive/like"
         static let likeStatus = "https://api.bilibili.com/x/web-interface/archive/has/like"
         static let coin = "https://api.bilibili.com/x/web-interface/coin/add"
-        static let playerInfo = "https://api.bilibili.com/x/player/v2"
-        static let playUrl = "https://api.bilibili.com/x/player/playurl"
+        static let playerInfo = "https://api.bilibili.com/x/player/wbi/v2"
+        static let playUrl = "https://api.bilibili.com/x/player/wbi/playurl"
         static let pcgPlayUrl = "https://api.bilibili.com/pgc/player/web/playurl"
         static let bangumiSeason = "https://bangumi.bilibili.com/view/web_api/season"
         static let userEpisodeInfo = "https://api.bilibili.com/pgc/season/episode/web/info"
@@ -83,21 +84,33 @@ enum WebRequest {
         }
         session.sessionConfiguration.timeoutIntervalForResource = 10
         session.sessionConfiguration.timeoutIntervalForRequest = 10
-        session.request(url,
-                        method: method,
-                        parameters: parameters,
-                        encoding: URLEncoding.default,
-                        headers: afheaders,
-                        interceptor: nil)
-            .responseData { response in
-                switch response.result {
-                case let .success(data):
-                    complete?(.success(data))
-                case let .failure(err):
-                    print(err)
-                    complete?(.failure(.networkFail))
-                }
+
+        let completionHandler: (AFDataResponse<Data>) -> Void = { response in
+            switch response.result {
+            case let .success(data):
+                complete?(.success(data))
+            case let .failure(err):
+                print(err)
+                complete?(.failure(.networkFail))
             }
+        }
+
+        addWbiSign(method: method, url: url, parameters: parameters) { wbiSign in
+            if let wbiSign {
+                session.request(wbiSign,
+                                method: method,
+                                encoding: URLEncoding.default,
+                                headers: afheaders)
+                    .responseData(completionHandler: completionHandler)
+            } else {
+                session.request(url,
+                                method: method,
+                                parameters: parameters,
+                                encoding: URLEncoding.default,
+                                headers: afheaders)
+                    .responseData(completionHandler: completionHandler)
+            }
+        }
     }
 
     static func requestJSON(method: HTTPMethod = .get,
@@ -145,10 +158,11 @@ enum WebRequest {
                     let object = try (decoder ?? JSONDecoder()).decode(T.self, from: data)
                     complete?(.success(object))
                 } catch let err {
-                    print("decode fail:", err)
+                    Logger.warn("decode fail: \(err)")
                     complete?(.failure(.decodeFail(message: err.localizedDescription + String(describing: err))))
                 }
             case let .failure(err):
+                Logger.warn("request fail: \(err)")
                 complete?(.failure(err))
             }
         }
@@ -172,7 +186,7 @@ enum WebRequest {
             switch response {
             case let .success(data):
                 do {
-                    let protobufObject = try T(serializedData: data)
+                    let protobufObject = try T(serializedBytes: data)
                     complete?(.success(protobufObject))
                 } catch let err {
                     Logger.warn("Protobuf parsing error: \(err.localizedDescription)")
@@ -328,10 +342,38 @@ extension WebRequest {
         return res.medias ?? []
     }
 
-    static func reportWatchHistory(aid: Int, cid: Int, currentTime: Int) {
+    static func reportWatchHistory(aid: Int, cid: Int, currentTime: Int, epid: Int? = nil, seasonId: Int? = nil, isBangumi: Bool = false) {
+        var parameters: [String: Any] = [
+            "aid": aid,
+            "cid": cid,
+            "played_time": currentTime,
+        ]
+
+        if isBangumi {
+            // 番剧类型标识
+            parameters["type"] = 4
+            parameters["sub_type"] = 1
+
+            // 番剧ID
+            if let epid = epid {
+                parameters["epid"] = epid
+            }
+            if let seasonId = seasonId {
+                parameters["sid"] = seasonId
+            }
+
+            // Web平台标识（关键：用于正确识别番剧历史记录）
+            parameters["mobi_app"] = "web"
+            parameters["device"] = "web"
+            parameters["platform"] = "web"
+        } else {
+            parameters["type"] = 3
+            parameters["sub_type"] = 0
+        }
+
         requestJSON(method: .post,
-                    url: EndPoint.reportHistory,
-                    parameters: ["aid": aid, "cid": cid, "progress": currentTime],
+                    url: EndPoint.heartbeat,
+                    parameters: parameters,
                     complete: nil)
     }
 
@@ -502,8 +544,12 @@ extension WebRequest {
         }
     }
 
-    static func requestLoginInfo(complete: ((Result<JSON, RequestError>) -> Void)?) {
-        requestJSON(url: "https://api.bilibili.com/x/web-interface/nav", complete: complete)
+    static func requestLoginInfo(accessKey: String? = nil, complete: ((Result<JSON, RequestError>) -> Void)?) {
+        var parameters: [String: Any] = [:]
+        if let accessKey {
+            parameters["access_key"] = accessKey
+        }
+        requestJSON(url: "https://api.bilibili.com/x/web-interface/nav", parameters: parameters, complete: complete)
     }
 }
 
@@ -691,10 +737,16 @@ struct SubtitleResp: Codable {
 
 struct SubtitleData: Codable, Hashable {
     let lan_doc: String
-    let subtitle_url: URL
+    let subtitle_url: String?
     let lan: String
 
-    var url: URL { subtitle_url.addSchemeIfNeed() }
+    var url: URL? {
+        if let subtitle_url, let sub_url = URL(string: subtitle_url) {
+            return sub_url.addSchemeIfNeed()
+        }
+        return nil
+    }
+
     var subtitleContents: [SubtitleContent]?
 }
 
@@ -705,8 +757,24 @@ struct Replys: Codable, Hashable {
             let avatar: String
         }
 
+        struct Emote: Codable, Hashable {
+            let text: String
+            let url: String
+        }
+
+        struct JumpUrl: Codable, Hashable {
+            let title: String
+        }
+
         struct Content: Codable, Hashable {
             let message: String
+            let pictures: [Picture]?
+            let emote: [String: Emote]?
+            let jump_url: [String: JumpUrl]?
+
+            struct Picture: Codable, Hashable {
+                let img_src: String
+            }
         }
 
         let member: Member
