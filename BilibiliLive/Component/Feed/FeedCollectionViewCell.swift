@@ -19,6 +19,7 @@ class FeedCollectionViewCell: BLMotionCollectionViewCell {
     private let imageView = UIImageView()
     private let infoView = UIView()
     private let avatarView = UIImageView()
+    private let overlayView = BLOverlayView()
 
     override func setup() {
         super.setup()
@@ -35,6 +36,16 @@ class FeedCollectionViewCell: BLMotionCollectionViewCell {
         imageView.layer.cornerRadius = 12
         imageView.clipsToBounds = true
         imageView.contentMode = .scaleAspectFill
+
+        contentView.addSubview(overlayView)
+        overlayView.snp.makeConstraints { make in
+            make.leading.equalTo(imageView.snp.leading)
+            make.trailing.equalTo(imageView.snp.trailing)
+            make.bottom.equalTo(imageView.snp.bottom)
+            make.top.equalTo(imageView.snp.top)
+        }
+        overlayView.layer.cornerRadius = imageView.layer.cornerRadius
+        overlayView.clipsToBounds = true
 
         contentView.addSubview(infoView)
         infoView.snp.makeConstraints { make in
@@ -85,6 +96,12 @@ class FeedCollectionViewCell: BLMotionCollectionViewCell {
 
     func setup(data: any DisplayData) {
         titleLabel.text = data.title
+        if let overlay = data.overlay {
+            overlayView.isHidden = false
+            overlayView.configure(overlay)
+        } else {
+            overlayView.isHidden = true
+        }
         upLabel.text = [data.ownerName, data.date].compactMap({ $0 }).joined(separator: " · ")
         if var pic = data.pic {
             if pic.scheme == nil {
@@ -93,8 +110,9 @@ class FeedCollectionViewCell: BLMotionCollectionViewCell {
             imageView.kf.setImage(with: pic, options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 360, height: 202))), .cacheOriginalImage])
         }
         if let avatar = data.avatar {
+            let resizedAvatar = avatar.deletingLastPathComponent().appending(component: avatar.lastPathComponent + "@240w_240h.jpg")
             avatarView.isHidden = false
-            avatarView.kf.setImage(with: avatar, options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 80, height: 80))), .processor(RoundCornerImageProcessor(radius: .widthFraction(0.5))), .cacheSerializer(FormatIndicatedCacheSerializer.png)])
+            avatarView.kf.setImage(with: resizedAvatar, options: [.processor(DownsamplingImageProcessor(size: CGSize(width: 80, height: 80))), .processor(RoundCornerImageProcessor(radius: .widthFraction(0.5))), .cacheSerializer(FormatIndicatedCacheSerializer.png)])
         } else {
             avatarView.isHidden = true
         }
